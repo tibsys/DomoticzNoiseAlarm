@@ -1,0 +1,3 @@
+[submodule "sound-detection"]
+	path = sound-detection
+	url = https://github.com/bazwilliams/sound-detection
