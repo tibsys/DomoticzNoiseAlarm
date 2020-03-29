@@ -137,9 +137,30 @@ class BasePlugin:
             Domoticz.Debug("Connection to the webcam interrupted")
             return False
                 
-        self.readErrors = 0
-        self.isReady = True
-        Devices[3].Update(nValue=1, sValue="On")
+        self.readErrors = 0        
+
+        # Get headers
+        s = self.inSock.recv( 1024 )
+        cnt = 0
+        self.headersReceived = False
+
+        while not s.startswith(b"RIFF") and cnt < 10:
+            Domoticz.Debug("Receiving HTTP headers")                
+            cnt = cnt + 1
+            s = self.inSock.recv( 1024 )
+
+        if s.startswith(b"RIFF"):
+            Domoticz.Debug("Start receiving the audio")
+            self.headersReceived = True     
+            self.isReady = True
+            Devices[3].Update(nValue=1, sValue="On")
+            return True          
+        else:
+            Domoticz.Debug("Did not receive the headers... Retry next time.")
+            self.isReady = False
+            self.inSock.close()
+            Domoticz.Debug("Connection closed")
+            return False
 
         return True
 
@@ -176,26 +197,8 @@ class BasePlugin:
         Devices[3].Update(nValue=0, sValue="Off")
 
         if self.connectToHost():
-            # Pass headers
-            s = self.inSock.recv( 1024 )
-            cnt = 0
-            self.headersReceived = False
-
-            while not s.startswith(b"RIFF") and cnt < 10:
-                Domoticz.Debug("Receiving HTTP headers")                
-                cnt = cnt + 1
-                s = self.inSock.recv( 1024 )
-    
-            if s.startswith(b"RIFF"):
-                Domoticz.Debug("Start receiving the audio")
-                self.headersReceived = True
-                # Go to read the audio
-                self.readAudio()     
-            else:
-                Domoticz.Debug("Did not receive the headers... Retry next time.")
-                self.isReady = False
-                self.inSock.close()
-                Domoticz.Debug("Connection closed")
+            if self.isReady:
+                self.readAudio()
 
     def applyFilter(self, sample):
         Domoticz.Debug("Applying filter")
@@ -223,12 +226,7 @@ class BasePlugin:
             return False
 
         if self.isStarted:
-            inputSignal = self.inSock.recv( 300000 )
-
-            # We want 1 second of audio so we want the buffer to be full            
-            while len(inputSignal) < (self.sampleFrequency * 2):
-                Domoticz.Debug("Read more data")
-                inputSignal += self.inSock.recv( 4096 )
+            inputSignal = self.inSock.recv( 300000 )                        
             
             Domoticz.Debug("Received " +str(len(inputSignal)) +" bytes of audio")
             if len(inputSignal) > 0:
