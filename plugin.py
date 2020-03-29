@@ -4,7 +4,7 @@
 # Developer: Tristan Israël - Alefbet
 #
 """
-<plugin key="NoiseAlarm" name="Noise Alarm" author="alefbet" version="1.0.5" wikilink="" externallink="https://alefbet.net/">
+<plugin key="NoiseAlarm" name="Noise Alarm" author="alefbet" version="1.0.7" wikilink="" externallink="https://alefbet.net/">
     <description>
         <h2>Noise Alarm</h2><br/>
         <h3>Features</h3>
@@ -19,9 +19,13 @@
     <params>        
         <param field="Address" label="IP Address" width="200px" required="true" default="127.0.0.1"/>
         <param field="Port" label="Port" width="200px" required="true" default="80"/>
+        <param field="Username" label="Login" width="200px" required="false" default=""/>
+        <param field="Password" label="Password" width="200px" required="false" default=""/>
         <param field="Mode1" label="Audio stream path" width="200px" required="true" default="/audio.wav"/>
-        <param field="Mode2" label="Listening frequency (seconds)" width="200px" required="true" default="1"/>        
+        <param field="Mode2" label="Audio sample frequency (hz)" width="200px" required="true" default="8000"/>        
         <param field="Mode3" label="Noise threshold (dB)" width="200px" required="true" default="30"/>
+        <param field="Mode4" label="Low-pass cut frequency (0=disabled)" width="200px" required="true" default="0"/>
+        
         <param field="Mode6" label="Debug" width="75px">
             <options>
                 <option label="True" value="Debug"/>
@@ -37,6 +41,14 @@ import math
 import audioop
 import socket
 import io
+import base64
+import re
+import time
+import struct
+import numpy
+from scipy.signal import butter, lfilter
+import scipy.signal as sg
+from collections import deque
 import Domoticz
 
 class BasePlugin:
@@ -48,9 +60,15 @@ class BasePlugin:
     currentValue = False
     isStarted = False # Plugin started
     readErrors = 0
+    headersReceived = False
+    filterEnabled = False
+    filterFrequency = 100
+    sampleFrequency = 8000
+    lowpass = 100
+    dbValues = deque([1,1,1,1,1])
     
     def __init__(self):   
-        isAlive = False       
+        self.isAlive = False       
 
     def createDevices(self):
         if not 1 in Devices:
@@ -78,21 +96,42 @@ class BasePlugin:
 
     def connectToHost(self):
         Domoticz.Debug("Try to connect to webcam")
+        self.headersReceived = False        
+
         self.inSock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             self.inSock.connect((Parameters["Address"], int(Parameters["Port"])))
             Domoticz.Debug("Connection to the webcam OK")
-        except ConnectionRefusedError:
+        except:
             Domoticz.Debug("Connection to the webcam refused")
             self.isReady = False
             return False
         
         Domoticz.Debug("Querying audio stream")
+
+        username = Parameters["Username"]        
+
         #TODO: check if Mode1 starts with '/'
-        connString = "GET " +Parameters["Mode1"] +" HTTP/1.0\r\nHost: " +Parameters["Address"] +"\r\n\r\n"
-        b = bytearray()
-        b.extend(map(ord, connString))
+        connString = "GET " +Parameters["Mode1"] +" HTTP/1.0\r\nHost: " +Parameters["Address"]  +"\r\n"
+
+        if not username:
+            Domoticz.Debug("Using anonymous connection")
+        else:
+            password = Parameters["Password"]
+            #Domoticz.Debug("Using credentials: " +username +":" +password)               
+            Domoticz.Debug("Using credentials")
+            data = bytearray(username +":" +password, "utf-8")
+            token=base64.encodebytes(data)
+            connString += ("Authorization: Basic " +token.decode("utf-8") +"\r\n")
+
+        # Terminate GET request string
+        connString += "\r\n"
+
+        #Domoticz.Debug("Connection string: " +connString)
+
         try:
+            b = bytearray()
+            b.extend(map(ord, connString))
             self.inSock.send(b)            
         except BrokenPipeError:
             Domoticz.Debug("Connection to the webcam interrupted")
@@ -105,15 +144,25 @@ class BasePlugin:
         return True
 
     def onStart(self):
-        # Check heartbeat setting
-        if Parameters["Mode2"] != "":
-            self.heartbeatFreq = int(Parameters["Mode2"])
-        Domoticz.Heartbeat(self.heartbeatFreq)
-
         # Check Debug setting
         if Parameters["Mode6"] == "Debug":
             Domoticz.Debugging(1)
             DumpConfigToLog()
+
+        Domoticz.Heartbeat(3)
+
+        # Set Nyquist frequency for low pass filter
+        self.filterEnabled = False
+        self.filterFrequency = int(Parameters["Mode4"])
+        if self.filterFrequency > 0:            
+            Domoticz.Log("Activated Lowpass filter with frequency " +str(self.filterFrequency))
+            self.sampleFrequency = int(Parameters["Mode2"])
+            if self.sampleFrequency == 0:
+                Domoticz.Log("Sample frequency not well formatted. Falling back to 8000.")
+                self.sampleFrequency = 8000
+            nyq = 0.5 * self.sampleFrequency           
+            self.lowpass = self.filterFrequency / nyq
+            self.filterEnabled = True
                
         if self.createDevices():
             Domoticz.Debug("Opening the audio stream on the device")                                            
@@ -126,26 +175,79 @@ class BasePlugin:
         Devices[2].Update(nValue=0, sValue="0")
         Devices[3].Update(nValue=0, sValue="Off")
 
-        if(self.connectToHost()):            
-            # Do a first read
-            self.readAudio()
+        if self.connectToHost():
+            # Pass headers
+            s = self.inSock.recv( 1024 )
+            cnt = 0
+            self.headersReceived = False
+
+            while not s.startswith(b"RIFF") and cnt < 10:
+                Domoticz.Debug("Receiving HTTP headers")                
+                cnt = cnt + 1
+                s = self.inSock.recv( 1024 )
+    
+            if s.startswith(b"RIFF"):
+                Domoticz.Debug("Start receiving the audio")
+                self.headersReceived = True
+                # Go to read the audio
+                self.readAudio()     
+            else:
+                Domoticz.Debug("Did not receive the headers... Retry next time.")
+                self.isReady = False
+                self.inSock.close()
+                Domoticz.Debug("Connection closed")
+
+    def applyFilter(self, sample):
+        Domoticz.Debug("Applying filter")
+
+        # Unpack wave
+        wav = self.unpack_wave(sample)
+
+        # Convert to floats        
+        floats = self.wave_shorts_to_floats(wav)
+        
+        # Apply filter
+        b, a = sg.butter(4, self.lowpass, 'low')
+        filteredSignal = lfilter(b, a, floats) 
+
+        # Convert to ints
+        ints = self.floats_to_wave_ints(filteredSignal)
+
+        # Pack wave
+        return self.pack_wave(ints)
 
     def readAudio(self):
-        if self.isStarted == True:                            
-            s = self.inSock.recv( 300000 )
-            #s_ = s.decode()
-            if s.startswith(b"HTTP/1.1 200 OK"):
-                Domoticz.Debug("Received HTTP header")
-                return
+        if not self.headersReceived:
+            Domoticz.Debug("HTTP headers not received. Cannot read the audio")
+            self.inSock.close()
+            return False
 
-            Domoticz.Debug("Received " +str(len(s)) +" bytes")
-            if len(s) > 0:
-                rms = audioop.rms(s, 2)
+        if self.isStarted:
+            inputSignal = self.inSock.recv( 300000 )
+
+            # We want 1 second of audio so we want the buffer to be full            
+            while len(inputSignal) < (self.sampleFrequency * 2):
+                Domoticz.Debug("Read more data")
+                inputSignal += self.inSock.recv( 4096 )
+            
+            Domoticz.Debug("Received " +str(len(inputSignal)) +" bytes of audio")
+            if len(inputSignal) > 0:
+                if self.filterEnabled:
+                    audioSignal = self.applyFilter(inputSignal)
+                else:
+                    audioSignal = inputSignal
+
+                rms = audioop.rms(audioSignal, 2)
                 dB = self.toDecibel(rms)                
-                Domoticz.Debug("Current dB value=" + str(dB))
-                Devices[2].Update(nValue=dB, sValue=str(dB))
+                Domoticz.Debug("Current dB value=" + str(dB))                
 
-                if dB > int(Parameters["Mode3"]):                                        
+                dbAvg = self.addToDecibelsAndReturnAverage(dB)
+                Domoticz.Debug("Average dB values=" + str(dbAvg))
+
+                Devices[2].Update(nValue=dbAvg, sValue=str(dbAvg))
+                Devices[1].Touch()
+
+                if dbAvg > int(Parameters["Mode3"]):                                        
                     if self.currentValue != True:
                         Domoticz.Log("Switch to On")
                         Devices[1].Update(nValue=1, sValue="On")
@@ -162,13 +264,21 @@ class BasePlugin:
                     Domoticz.Log("To many read errors. Disconnecting from webcam.")
                     self.inSock.close()
                     self.isReady = False   
-                    Devices[3].Update(nValue=0, sValue="Off")                 
+                    Devices[3].Update(nValue=0, sValue="Off")                         
+            
+            #time.sleep(0) # Yield
         else:
-            Domoticz.Debug("Plugin not started")     
+            Domoticz.Debug("Plugin not started or stopping")
             
     def onStop(self):
-        Domoticz.Debug("onStop called")                     
+        Domoticz.Debug("onStop called") 
+        Devices[3].Update(nValue=0, sValue="Off")  
+
+        self.isReady = False
         self.isStarted = False
+           
+        if self.inSock:
+            self.inSock.close()                                           
 
     def onConnect(self, Connection, Status, Description):
         Domoticz.Debug("onConnect called")
@@ -185,6 +295,9 @@ class BasePlugin:
     def onHeartbeat(self):
         self.isAlive = True
 
+        if not self.isStarted:
+            return False
+
         if not self.isReady:                    
             Domoticz.Debug("Try to reconnect to the webcam")
             self.connectToHost()
@@ -194,6 +307,25 @@ class BasePlugin:
 
     def toDecibel(self, rms):
         return round((20*(math.log(rms) / math.log(10))))
+
+    def addToDecibelsAndReturnAverage(self, db):
+        self.dbValues.appendleft(db)
+        self.dbValues.pop()
+        return int(round(numpy.mean(self.dbValues)))
+
+    def unpack_wave(self, data):
+        dlen=(len(data)/2)
+        return struct.unpack('%ih' % dlen, data)
+
+    def wave_shorts_to_floats(self, ints):
+        return [i * 1.0/32768 for i in ints]
+
+    def floats_to_wave_ints(self, floats):
+        return [int(round(f * 32767)) for f in floats]
+
+    def pack_wave(self, data):
+        dlen=len(data)
+        return struct.pack('<%dh' % dlen, *data)
 
 global _plugin
 _plugin = BasePlugin()
