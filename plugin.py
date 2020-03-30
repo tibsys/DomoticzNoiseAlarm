@@ -4,7 +4,7 @@
 # Developer: Tristan Israël - Alefbet
 #
 """
-<plugin key="NoiseAlarm" name="Noise Alarm" author="alefbet" version="1.0.7" wikilink="" externallink="https://alefbet.net/">
+<plugin key="NoiseAlarm" name="Noise Alarm" author="alefbet" version="1.0.8" wikilink="" externallink="https://alefbet.net/">
     <description>
         <h2>Noise Alarm</h2><br/>
         <h3>Features</h3>
@@ -226,7 +226,18 @@ class BasePlugin:
             return False
 
         if self.isStarted:
-            inputSignal = self.inSock.recv( 300000 )                        
+            try:
+                inputSignal = self.inSock.recv( 300000 )                        
+            except:
+                self.readErrors = self.readErrors+1
+                Domoticz.Log("An error occured while reading the audio.")
+                if self.readErrors >= 3:
+                    Domoticz.Log("Too many read errors. Disconnecting from webcam.")
+                    self.inSock.close()
+                    self.isReady = False   
+                    Devices[3].Update(nValue=0, sValue="Off")
+
+                return False
             
             Domoticz.Debug("Received " +str(len(inputSignal)) +" bytes of audio")
             if len(inputSignal) > 0:
@@ -259,7 +270,7 @@ class BasePlugin:
                 Domoticz.Debug("No data received from webcam. Connection error?")
                 self.readErrors = self.readErrors + 1
                 if self.readErrors >= 3:
-                    Domoticz.Log("To many read errors. Disconnecting from webcam.")
+                    Domoticz.Log("Too many read errors. Disconnecting from webcam.")
                     self.inSock.close()
                     self.isReady = False   
                     Devices[3].Update(nValue=0, sValue="Off")                         
