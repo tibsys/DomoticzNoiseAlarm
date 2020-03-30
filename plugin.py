@@ -46,6 +46,7 @@ import re
 import time
 import struct
 import numpy
+import constant
 from scipy.signal import butter, lfilter
 import scipy.signal as sg
 from collections import deque
@@ -98,7 +99,9 @@ class BasePlugin:
         Domoticz.Debug("Try to connect to webcam")
         self.headersReceived = False        
 
-        self.inSock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.inSock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)        
+        self.inSock.settimeout(1.0)
+        Domoticz.Debug("Socket timeout set to " +str(self.inSock.gettimeout()))
         try:
             self.inSock.connect((Parameters["Address"], int(Parameters["Port"])))
             Domoticz.Debug("Connection to the webcam OK")
@@ -231,7 +234,7 @@ class BasePlugin:
             except:
                 self.readErrors = self.readErrors+1
                 Domoticz.Log("An error occured while reading the audio.")
-                if self.readErrors >= 3:
+                if self.readErrors >= constant.MAX_ERRORS:
                     Domoticz.Log("Too many read errors. Disconnecting from webcam.")
                     self.inSock.close()
                     self.isReady = False   
@@ -269,7 +272,7 @@ class BasePlugin:
             else:
                 Domoticz.Debug("No data received from webcam. Connection error?")
                 self.readErrors = self.readErrors + 1
-                if self.readErrors >= 3:
+                if self.readErrors >= constant.MAX_ERRORS:
                     Domoticz.Log("Too many read errors. Disconnecting from webcam.")
                     self.inSock.close()
                     self.isReady = False   
