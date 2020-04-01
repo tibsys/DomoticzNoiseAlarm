@@ -276,11 +276,16 @@ class BasePlugin:
                     Domoticz.Log("Too many read errors. Disconnecting from webcam.")
                     self.inSock.close()
                     self.isReady = False   
-                    Devices[3].Update(nValue=0, sValue="Off")                         
+                    self.connectionLost()                   
             
             #time.sleep(0) # Yield
         else:
             Domoticz.Debug("Plugin not started or stopping")
+
+    def connectionLost(self):
+        Devices[3].Update(nValue=0, sValue="Off")
+        Devices[2].Update(nValue=0, sValue="0")
+        Devices[1].Update(nValue=0, sValue="Off")
             
     def onStop(self):
         Domoticz.Debug("onStop called") 
