@@ -97,10 +97,11 @@ class BasePlugin:
 
     def connectToHost(self):
         Domoticz.Debug("Try to connect to webcam")
-        self.headersReceived = False        
+        self.headersReceived = False    
+        self.readErrors = 0    
 
         self.inSock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)        
-        self.inSock.settimeout(1.0)
+        self.inSock.settimeout(2.0)
         Domoticz.Debug("Socket timeout set to " +str(self.inSock.gettimeout()))
         try:
             self.inSock.connect((Parameters["Address"], int(Parameters["Port"])))
